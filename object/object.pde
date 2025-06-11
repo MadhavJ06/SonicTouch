@@ -13,19 +13,21 @@ NetAddress abletonAddress;
 NetAddress pythonAddress;
 boolean useMLGestures = true;
 
-// --- Object tracking settings ---
-color targetColor;
-boolean colorSelected = false;
-float colorSensitivity = 35;
-PVector trackedPoint = new PVector(0, 0);
-boolean objectDetected = false;
-ArrayList<PVector> gestureTrail = new ArrayList<PVector>();
+// --- Multi-object tracking settings ---
+int maxObjects = 4;  // Support up to 4 different colored objects
+color[] targetColors = new color[maxObjects];
+boolean[] colorsSelected = new boolean[maxObjects];
+float[] colorSensitivities = new float[maxObjects];
+PVector[] trackedPoints = new PVector[maxObjects];
+boolean[] objectsDetected = new boolean[maxObjects];
+ArrayList<PVector>[] gestureTrails = new ArrayList[maxObjects];
 int maxTrailPoints = 30;
+int currentSelectedObject = 0;  // Which object we're currently selecting/modifying
 
 // --- Track settings ---
 int currentTrack = 0;
-float currentVolume = 0.7;
-float previousVolume = -1;
+float[] trackVolumes = new float[maxObjects];
+float[] previousVolumes = new float[maxObjects];
 
 // --- ML Gesture recognition variables ---
 String lastDetectedGesture = "";
@@ -63,23 +65,39 @@ void setup() {
     cam.start();
   }
   
+  // Initialize multi-object tracking arrays
+  for (int i = 0; i < maxObjects; i++) {
+    targetColors[i] = color(0);
+    colorsSelected[i] = false;
+    colorSensitivities[i] = 35.0;
+    trackedPoints[i] = new PVector(0, 0);
+    objectsDetected[i] = false;
+    gestureTrails[i] = new ArrayList<PVector>();
+    trackVolumes[i] = 0.7;
+    previousVolumes[i] = -1;
+  }
+  
   // Initialize OSC communication
   oscP5 = new OscP5(this, 12001);  // Listen on port 12001 for messages from Python
   abletonAddress = new NetAddress("127.0.0.1", 11000);  // Send to Ableton on 11000
   pythonAddress = new NetAddress("127.0.0.1", 12000);   // Send to Python ML on 12000
   
-  // Request initial volume
-  requestTrackVolume();
+  // Request initial volumes for all tracks
+  for (int i = 0; i < maxObjects; i++) {
+    requestTrackVolume(i);
+  }
   
   println("------------------------------------");
-  println("ML GESTURE CONTROL FOR ABLETON LIVE");
+  println("MULTI-OBJECT ML GESTURE CONTROL FOR ABLETON LIVE");
   println("------------------------------------");
-  println("Click on an object to track its color");
+  println("Click on objects to track their colors (up to " + maxObjects + " objects)");
+  println("Press 1-" + maxObjects + " to select which object to modify");
   println("Press 'm' to toggle between direct control and ML gesture recognition");
   println("Press 't' to enter training mode");
-  println("LEFT/RIGHT arrows change Ableton track");
-  println("UP/DOWN arrows adjust color sensitivity");
-  println("Press 'r' to reset color selection");
+  println("LEFT/RIGHT arrows change Ableton track for current object");
+  println("UP/DOWN arrows adjust color sensitivity for current object");
+  println("Press 'r' to reset color selection for current object");
+  println("Press 'c' to clear all color selections");
 }
 
 void draw() {
@@ -91,13 +109,15 @@ void draw() {
   // Display camera image
   image(cam, 0, 0);
   
-  // Only track if a color has been selected
-  if (colorSelected) {
-    trackObject();
-    
-    // Send tracking data to Python ML if enabled
-    if (useMLGestures && objectDetected) {
-      sendTrackingData();
+  // Track all selected objects
+  for (int i = 0; i < maxObjects; i++) {
+    if (colorsSelected[i]) {
+      trackObject(i);
+      
+      // Send tracking data to Python ML if enabled
+      if (useMLGestures && objectsDetected[i]) {
+        sendTrackingData(i);
+      }
     }
   }
   
@@ -110,12 +130,15 @@ void draw() {
   }
 }
 
-void trackObject() {
+void trackObject(int objectIndex) {
   cam.loadPixels();
   
   float sumX = 0;
   float sumY = 0;
   int count = 0;
+  
+  color targetColor = targetColors[objectIndex];
+  float sensitivity = colorSensitivities[objectIndex];
   
   // Search for pixels matching the target color
   for (int x = 0; x < cam.width; x++) {
@@ -135,7 +158,7 @@ void trackObject() {
       float d = dist(r1, g1, b1, r2, g2, b2);
       
       // If color is close enough to target, count it
-      if (d < colorSensitivity) {
+      if (d < sensitivity) {
         sumX += x;
         sumY += y;
         count++;
@@ -145,55 +168,77 @@ void trackObject() {
   
   // If enough matching pixels found, update tracked position
   if (count > 50) {
-    objectDetected = true;
+    objectsDetected[objectIndex] = true;
     
     // Calculate average position (centroid)
-    trackedPoint.x = sumX / count;
-    trackedPoint.y = sumY / count;
+    trackedPoints[objectIndex].x = sumX / count;
+    trackedPoints[objectIndex].y = sumY / count;
     
     // Add point to the gesture trail
-    if (gestureTrail.size() >= maxTrailPoints) {
-      gestureTrail.remove(0);
+    ArrayList<PVector> trail = gestureTrails[objectIndex];
+    if (trail.size() >= maxTrailPoints) {
+      trail.remove(0);
     }
-    gestureTrail.add(new PVector(trackedPoint.x, trackedPoint.y));
+    trail.add(new PVector(trackedPoints[objectIndex].x, trackedPoints[objectIndex].y));
     
     // If not using ML, directly map Y position to volume
     if (!useMLGestures) {
       // Map Y position to volume (top = max volume, bottom = min volume)
-      float newVolume = map(trackedPoint.y, 0, camHeight, 1.0, 0.0);
-      currentVolume = newVolume;
+      float newVolume = map(trackedPoints[objectIndex].y, 0, camHeight, 1.0, 0.0);
+      trackVolumes[objectIndex] = newVolume;
       
       // Send volume to Ableton if it changed enough
-      if (abs(currentVolume - previousVolume) > 0.01) {
-        previousVolume = currentVolume;
-        setTrackVolume();
+      if (abs(trackVolumes[objectIndex] - previousVolumes[objectIndex]) > 0.01) {
+        previousVolumes[objectIndex] = trackVolumes[objectIndex];
+        setTrackVolume(objectIndex);
       }
     }
     
     // Draw the gesture trail if in training mode or recently detected gesture
     if (trainingMode || millis() < gestureDisplayTime + 2000) {
-      // Draw the gesture path
-      stroke(trainingMode ? color(255, 0, 0, 200) : color(255, 255, 0, 150));
+      // Use different colors for different objects
+      color trailColor = getObjectColor(objectIndex);
+      stroke(red(trailColor), green(trailColor), blue(trailColor), trainingMode ? 200 : 150);
       strokeWeight(trainingMode ? 3 : 2);
       noFill();
       beginShape();
-      for (PVector p : gestureTrail) {
+      for (PVector p : trail) {
         vertex(p.x, p.y);
       }
       endShape();
     }
     
-    // Draw tracking indicator
+    // Draw tracking indicator with object-specific color
     noFill();
-    stroke(0, 255, 0);
+    color indicatorColor = getObjectColor(objectIndex);
+    stroke(red(indicatorColor), green(indicatorColor), blue(indicatorColor));
     strokeWeight(2);
-    ellipse(trackedPoint.x, trackedPoint.y, 40, 40);
+    ellipse(trackedPoints[objectIndex].x, trackedPoints[objectIndex].y, 40, 40);
     
     // Draw cross at center
-    line(trackedPoint.x - 10, trackedPoint.y, trackedPoint.x + 10, trackedPoint.y);
-    line(trackedPoint.x, trackedPoint.y - 10, trackedPoint.x, trackedPoint.y + 10);
+    line(trackedPoints[objectIndex].x - 10, trackedPoints[objectIndex].y, 
+         trackedPoints[objectIndex].x + 10, trackedPoints[objectIndex].y);
+    line(trackedPoints[objectIndex].x, trackedPoints[objectIndex].y - 10, 
+         trackedPoints[objectIndex].x, trackedPoints[objectIndex].y + 10);
+    
+    // Draw object number
+    fill(255);
+    textAlign(CENTER, CENTER);
+    text(str(objectIndex), trackedPoints[objectIndex].x, trackedPoints[objectIndex].y - 25);
+    textAlign(LEFT, BASELINE); // Reset text alignment
   } else {
-    objectDetected = false;
+    objectsDetected[objectIndex] = false;
+  }
+}
+
+color getObjectColor(int objectIndex) {
+  // Return distinct colors for each object
+  switch(objectIndex) {
+    case 0: return color(0, 255, 0);    // Green
+    case 1: return color(255, 0, 0);    // Red
+    case 2: return color(0, 0, 255);    // Blue
+    case 3: return color(255, 255, 0);  // Yellow
+    default: return color(255, 255, 255); // White
   }
 }
 
@@ -201,63 +246,92 @@ void drawUI() {
   // Background for UI elements
   fill(0, 150);
   noStroke();
-  rect(0, 0, width, 60);
-  rect(0, height-40, width, 40);
+  rect(0, 0, width, 80);
+  rect(0, height-60, width, 60);
   
-  // Show selected color
+  // Show selected colors for all objects
   fill(255);
-  text("Selected Color:", 10, 20);
+  text("Objects:", 10, 20);
   
-  if (colorSelected) {
-    fill(targetColor);
-    rect(120, 8, 30, 20);
-  } else {
-    fill(150);
-    text("Click to select", 120, 20);
+  for (int i = 0; i < maxObjects; i++) {
+    int xPos = 70 + i * 80;
+    
+    // Highlight current selected object
+    if (i == currentSelectedObject) {
+      fill(255, 255, 0, 100);
+      rect(xPos - 5, 5, 75, 35);
+    }
+    
+    fill(255);
+    text(str(i), xPos, 20);
+    
+    if (colorsSelected[i]) {
+      fill(targetColors[i]);
+      rect(xPos + 15, 8, 25, 15);
+      
+      // Show tracking status
+      fill(objectsDetected[i] ? color(0, 255, 0) : color(255, 0, 0));
+      ellipse(xPos + 50, 15, 8, 8);
+    } else {
+      fill(150);
+      text("--", xPos + 15, 20);
+    }
   }
   
-  // Show current track and volume
+  // Show current object info
   fill(255);
-  text("Track: " + currentTrack, 200, 20);
-  text("Volume: " + nf(currentVolume, 0, 2), 300, 20);
-  text("Sensitivity: " + int(colorSensitivity), 430, 20);
+  text("Current Object: " + currentSelectedObject, 10, 40);
+  if (colorsSelected[currentSelectedObject]) {
+    text("Track: " + currentSelectedObject, 150, 40);
+    text("Volume: " + nf(trackVolumes[currentSelectedObject], 0, 2), 220, 40);
+    text("Sensitivity: " + int(colorSensitivities[currentSelectedObject]), 320, 40);
+  } else {
+    text("No color selected", 150, 40);
+  }
   
   // Show control mode
   fill(255);
-  text("Mode: " + (useMLGestures ? "ML GESTURES" : "DIRECT CONTROL"), 10, 40);
+  text("Mode: " + (useMLGestures ? "ML GESTURES" : "DIRECT CONTROL"), 10, 60);
   
   // Show detected gesture if available
   if (useMLGestures && !lastDetectedGesture.equals("") && millis() < gestureDisplayTime + 2000) {
     fill(255, 255, 0);
-    text("Gesture: " + lastDetectedGesture + " (" + nf(gestureConfidence, 0, 2) + ")", 200, 40);
-  }
-  
-  // Show tracking status
-  if (colorSelected) {
-    fill(objectDetected ? color(0, 255, 0) : color(255, 0, 0));
-    text(objectDetected ? "TRACKING" : "NOT DETECTED", 430, 40);
+    text("Gesture: " + lastDetectedGesture + " (" + nf(gestureConfidence, 0, 2) + ")", 200, 60);
   }
   
   // Show controls reminder
   fill(255);
-  String controls = "LEFT/RIGHT: Track | UP/DOWN: Sensitivity | M: Toggle Mode | T: Train | R: Reset";
-  text(controls, 10, height-15);
+  String controls1 = "1-" + maxObjects + ": Select Object | LEFT/RIGHT: Track | UP/DOWN: Sensitivity | M: Toggle Mode";
+  String controls2 = "T: Train | R: Reset Current | C: Clear All | Click: Select Color";
+  text(controls1, 10, height-35);
+  text(controls2, 10, height-15);
   
-  // Draw volume bar
-  noStroke();
-  fill(50);
-  rect(width-30, 70, 20, height-140);
-  
-  if (objectDetected) {
-    fill(0, 255, 0);
-  } else if (colorSelected) {
-    fill(255, 165, 0); // Orange
-  } else {
-    fill(150);
+  // Draw volume bars for all objects
+  for (int i = 0; i < maxObjects; i++) {
+    int xPos = width - 150 + i * 35;
+    
+    noStroke();
+    fill(50);
+    rect(xPos, 70, 25, height-160);
+    
+    if (objectsDetected[i]) {
+      color objColor = getObjectColor(i);
+      fill(red(objColor), green(objColor), blue(objColor));
+    } else if (colorsSelected[i]) {
+      fill(255, 165, 0); // Orange
+    } else {
+      fill(150);
+    }
+    
+    float barHeight = trackVolumes[i] * (height-160);
+    rect(xPos, 70 + (height-160) - barHeight, 25, barHeight);
+    
+    // Object number
+    fill(255);
+    textAlign(CENTER, CENTER);
+    text(str(i), xPos + 12, height-140);
+    textAlign(LEFT, BASELINE); // Reset
   }
-  
-  float barHeight = currentVolume * (height-140);
-  rect(width-30, 70 + (height-140) - barHeight, 20, barHeight);
 }
 
 void drawTrainingUI() {
@@ -271,40 +345,54 @@ void drawTrainingUI() {
   textAlign(CENTER, CENTER);
   text("GESTURE TRAINING MODE", width/2, 50);
   
-  // Current gesture
+  // Current gesture and object
   fill(255, 255, 0);
   text("Current gesture: " + availableGestures[currentGestureIndex], width/2, 100);
-  text("Samples recorded: " + samplesRecorded, width/2, 130);
+  text("Training with object: " + currentSelectedObject, width/2, 130);
+  
+  // Show which objects are available for training
+  String availableObjects = "Available objects: ";
+  for (int i = 0; i < maxObjects; i++) {
+    if (colorsSelected[i]) {
+      availableObjects += i + " ";
+    }
+  }
+  fill(200);
+  text(availableObjects, width/2, 160);
+  
+  fill(255, 255, 0);
+  text("Samples recorded: " + samplesRecorded, width/2, 180);
   
   // Recording status
   if (recordingGesture) {
     fill(255, 0, 0);
-    ellipse(width/2, 160, 20, 20);
+    ellipse(width/2, 210, 20, 20);
     fill(255);
-    text("RECORDING SAMPLES", width/2, 190);
+    text("RECORDING SAMPLES", width/2, 240);
     
     // Show quality of last sample
     if (lastSampleQuality > 0) {
       fill(lastSampleQuality > 0.3 ? color(0, 255, 0) : color(255, 165, 0));
-      text("Movement quality: " + nf(lastSampleQuality, 0, 2), width/2, 220);
+      text("Movement quality: " + nf(lastSampleQuality, 0, 2), width/2, 270);
     }
     
     fill(255);
-    text("Move the object to demonstrate the gesture", width/2, 250);
+    text("Move object " + currentSelectedObject + " to demonstrate the gesture", width/2, 300);
   } else {
     fill(255);
-    text("Press SPACE to start recording samples", width/2, 160);
+    text("Press SPACE to start recording samples", width/2, 210);
   }
   
   // Display training status message if any
   if (!trainingStatus.equals("") && millis() < trainingStatusDisplayTime + 3000) {
     fill(255, 255, 0);
-    text(trainingStatus, width/2, 280);
+    text(trainingStatus, width/2, 330);
   }
   
   // Instructions
   fill(200);
-  text("← → : Switch gesture type", width/2, height-120);
+  text("← → : Switch gesture type", width/2, height-150);
+  text("1-" + maxObjects + " : Select training object", width/2, height-120);
   text("SPACE : Start/stop recording samples", width/2, height-90);
   text("S : Save model and exit training", width/2, height-60);
   text("ESC : Exit training mode", width/2, height-30);
@@ -313,17 +401,19 @@ void drawTrainingUI() {
   textSize(16); // Reset text size
 }
 
-void sendTrackingData() {
+void sendTrackingData(int objectIndex) {
   // Send tracked object position to Python ML
   OscMessage msg = new OscMessage("/tracking/position");
-  msg.add((float) trackedPoint.x / camWidth); // Normalize x position
-  msg.add((float) trackedPoint.y / camHeight); // Normalize y position
+  msg.add(objectIndex); // Add object index
+  msg.add((float) trackedPoints[objectIndex].x / camWidth); // Normalize x position
+  msg.add((float) trackedPoints[objectIndex].y / camHeight); // Normalize y position
   msg.add(1); // Object is detected
   oscP5.send(msg, pythonAddress);
   
-  // Also send current track
+  // Also send current track for this object
   OscMessage trackMsg = new OscMessage("/tracking/track");
-  trackMsg.add(currentTrack);
+  trackMsg.add(objectIndex); // Object index
+  trackMsg.add(objectIndex); // Track index (object index maps to track index)
   oscP5.send(trackMsg, pythonAddress);
 }
 
@@ -332,14 +422,17 @@ void mousePressed() {
   if (trainingMode) return;
   
   // Check if we're clicking in the camera image area (avoid UI elements)
-  if (mouseY > 60 && mouseY < height - 40) {
+  if (mouseY > 80 && mouseY < height - 60) {
     int loc = mouseX + mouseY * cam.width;
     
     if (loc >= 0 && loc < cam.pixels.length) {
-      targetColor = cam.pixels[loc];
-      colorSelected = true;
-      gestureTrail.clear(); // Clear the gesture trail
-      println("Selected color: R=" + red(targetColor) + ", G=" + green(targetColor) + ", B=" + blue(targetColor));
+      targetColors[currentSelectedObject] = cam.pixels[loc];
+      colorsSelected[currentSelectedObject] = true;
+      gestureTrails[currentSelectedObject].clear(); // Clear the gesture trail
+      
+      color selectedColor = targetColors[currentSelectedObject];
+      println("Selected color for object " + currentSelectedObject + ": R=" + red(selectedColor) + 
+              ", G=" + green(selectedColor) + ", B=" + blue(selectedColor));
     }
   }
 }
@@ -349,6 +442,15 @@ void keyPressed() {
   if (trainingMode) {
     handleTrainingModeKeys();
     return;
+  }
+  
+  // Object selection (1-4 keys)
+  if (key >= '1' && key <= '4') {
+    int objectIndex = key - '1';
+    if (objectIndex < maxObjects) {
+      currentSelectedObject = objectIndex;
+      println("Selected object " + currentSelectedObject);
+    }
   }
   
   // Toggle between direct control and ML gestures
@@ -361,41 +463,52 @@ void keyPressed() {
   if (key == 't' || key == 'T') {
     trainingMode = true;
     samplesRecorded = 0;
-    gestureTrail.clear();
+    for (int i = 0; i < maxObjects; i++) {
+      gestureTrails[i].clear();
+    }
     println("Entered training mode");
   }
   
-  // Track controls
+  // Track controls for current selected object
   if (keyCode == LEFT) {
-    if (currentTrack > 0) {
-      currentTrack--;
-      requestTrackVolume();
-      sendTrackingData();  // Update Python with new track
-      println("Switched to track " + currentTrack);
-    }
+    // Previous track - in this case, just change the current selected object
+    currentSelectedObject = (currentSelectedObject + maxObjects - 1) % maxObjects;
+    println("Selected object " + currentSelectedObject);
   } else if (keyCode == RIGHT) {
-    currentTrack++;
-    requestTrackVolume();
-    sendTrackingData();  // Update Python with new track
-    println("Switched to track " + currentTrack);
+    // Next track - in this case, just change the current selected object
+    currentSelectedObject = (currentSelectedObject + 1) % maxObjects;
+    println("Selected object " + currentSelectedObject);
   }
   
-  // Sensitivity controls
+  // Sensitivity controls for current selected object
   if (keyCode == UP) {
-    colorSensitivity += 5;
-    if (colorSensitivity > 150) colorSensitivity = 150;
-    println("Color sensitivity: " + colorSensitivity);
+    colorSensitivities[currentSelectedObject] += 5;
+    if (colorSensitivities[currentSelectedObject] > 150) {
+      colorSensitivities[currentSelectedObject] = 150;
+    }
+    println("Object " + currentSelectedObject + " sensitivity: " + colorSensitivities[currentSelectedObject]);
   } else if (keyCode == DOWN) {
-    colorSensitivity -= 5;
-    if (colorSensitivity < 5) colorSensitivity = 5;
-    println("Color sensitivity: " + colorSensitivity);
+    colorSensitivities[currentSelectedObject] -= 5;
+    if (colorSensitivities[currentSelectedObject] < 5) {
+      colorSensitivities[currentSelectedObject] = 5;
+    }
+    println("Object " + currentSelectedObject + " sensitivity: " + colorSensitivities[currentSelectedObject]);
   }
   
-  // Reset color selection
+  // Reset color selection for current object
   if (key == 'r' || key == 'R') {
-    colorSelected = false;
-    gestureTrail.clear();
-    println("Color selection reset");
+    colorsSelected[currentSelectedObject] = false;
+    gestureTrails[currentSelectedObject].clear();
+    println("Color selection reset for object " + currentSelectedObject);
+  }
+  
+  // Clear all color selections
+  if (key == 'c' || key == 'C') {
+    for (int i = 0; i < maxObjects; i++) {
+      colorsSelected[i] = false;
+      gestureTrails[i].clear();
+    }
+    println("All color selections cleared");
   }
 }
 
@@ -409,17 +522,29 @@ void handleTrainingModeKeys() {
     samplesRecorded = 0;  // Reset sample count when changing gesture
   }
   
+  // Change which object to train with
+  if (key >= '1' && key <= '4') {
+    int objectIndex = key - '1';
+    if (objectIndex < maxObjects && colorsSelected[objectIndex]) {
+      currentSelectedObject = objectIndex;
+      println("Training mode: selected object " + currentSelectedObject);
+    }
+  }
+  
   // Start/stop recording samples for current gesture
   if (key == ' ') {
     recordingGesture = !recordingGesture;
-    gestureTrail.clear(); // Clear the gesture trail
+    for (int i = 0; i < maxObjects; i++) {
+      gestureTrails[i].clear(); // Clear all gesture trails
+    }
     
     if (recordingGesture) {
       // Start recording
       OscMessage msg = new OscMessage("/training/start");
       msg.add(availableGestures[currentGestureIndex]);
+      msg.add(currentSelectedObject); // Add which object we're training
       oscP5.send(msg, pythonAddress);
-      println("Started recording samples for " + availableGestures[currentGestureIndex]);
+      println("Started recording samples for " + availableGestures[currentGestureIndex] + " with object " + currentSelectedObject);
     } else {
       // Stop recording
       OscMessage msg = new OscMessage("/training/stop");
@@ -457,38 +582,42 @@ void oscEvent(OscMessage msg) {
   if (msg.addrPattern().equals("/gesture/detected")) {
     String gesture = msg.get(0).stringValue();
     float confidence = msg.get(1).floatValue();
+    int objectIndex = msg.get(2).intValue(); // Get which object detected the gesture
     
-    lastDetectedGesture = gesture;
+    lastDetectedGesture = gesture + " (obj " + objectIndex + ")";
     gestureConfidence = confidence;
     gestureDisplayTime = millis();
-    println("Received gesture: " + gesture + " with confidence " + confidence);
+    println("Received gesture: " + gesture + " from object " + objectIndex + " with confidence " + confidence);
   }
   else if (msg.addrPattern().equals("/control/volume_adjust")) {
-    float amount = msg.get(0).floatValue();
-    float newVolume = constrain(currentVolume + amount, 0, 1);
+    int objectIndex = msg.get(0).intValue();
+    float amount = msg.get(1).floatValue();
+    float newVolume = constrain(trackVolumes[objectIndex] + amount, 0, 1);
     
-    if (newVolume != currentVolume) {
-      currentVolume = newVolume;
-      setTrackVolume();
-      println("Volume adjusted by " + amount + " to " + currentVolume);
+    if (newVolume != trackVolumes[objectIndex]) {
+      trackVolumes[objectIndex] = newVolume;
+      setTrackVolume(objectIndex);
+      println("Volume adjusted for object " + objectIndex + " by " + amount + " to " + trackVolumes[objectIndex]);
     }
   }
   else if (msg.addrPattern().equals("/control/track_change")) {
-    int track = msg.get(0).intValue();
+    int objectIndex = msg.get(0).intValue();
+    int track = msg.get(1).intValue();
     
-    if (track != currentTrack && track >= 0) {
-      currentTrack = track;
-      requestTrackVolume();
-      println("Track changed to: " + currentTrack);
+    if (track >= 0) {
+      // In multi-object mode, each object controls its own track (track = objectIndex)
+      requestTrackVolume(objectIndex);
+      println("Track changed for object " + objectIndex + " to: " + track);
     }
   }
   else if (msg.addrPattern().equals("/training/sample")) {
     String gesture = msg.get(0).stringValue();
     float quality = msg.get(1).floatValue();
+    int objectIndex = msg.get(2).intValue();
     
     lastSampleQuality = quality;
     samplesRecorded++;
-    println("Recorded sample for " + gesture + " with quality " + quality);
+    println("Recorded sample for " + gesture + " with object " + objectIndex + " with quality " + quality);
   }
   else if (msg.addrPattern().equals("/training/status")) {
     String status = msg.get(0).stringValue();
@@ -508,9 +637,9 @@ void oscEvent(OscMessage msg) {
     int track = msg.get(0).intValue();
     float volume = msg.get(1).floatValue();
     
-    if (track == currentTrack) {
-      currentVolume = volume;
-      previousVolume = volume;
+    if (track < maxObjects) {
+      trackVolumes[track] = volume;
+      previousVolumes[track] = volume;
       println("← Received volume for track " + track + ": " + nf(volume, 0, 2));
     }
   }
@@ -520,19 +649,19 @@ void oscEvent(OscMessage msg) {
 }
 
 // --- Ableton OSC Communication ---
-void setTrackVolume() {
-  println("→ Setting track " + currentTrack + " volume to " + nf(currentVolume, 0, 2));
+void setTrackVolume(int trackIndex) {
+  println("→ Setting track " + trackIndex + " volume to " + nf(trackVolumes[trackIndex], 0, 2));
   
   OscMessage msg = new OscMessage("/live/track/set/volume");
-  msg.add(currentTrack);
-  msg.add(currentVolume);
+  msg.add(trackIndex);
+  msg.add(trackVolumes[trackIndex]);
   oscP5.send(msg, abletonAddress);
 }
 
-void requestTrackVolume() {
-  println("→ Requesting track " + currentTrack + " volume");
+void requestTrackVolume(int trackIndex) {
+  println("→ Requesting track " + trackIndex + " volume");
   
   OscMessage msg = new OscMessage("/live/track/get/volume");
-  msg.add(currentTrack);
+  msg.add(trackIndex);
   oscP5.send(msg, abletonAddress);
 }
