@@ -48,8 +48,8 @@ class GestureRecognizer:
         
         # Load phone sensor ML model (from run_conductor.py)
         try:
-            self.sensor_model = joblib.load('../conductor_model.joblib')
-            self.sensor_scaler = joblib.load('../scaler.joblib')
+            self.sensor_model = joblib.load('conductor_model.joblib')
+            self.sensor_scaler = joblib.load('scaler.joblib')
             print("Loaded existing sensor gesture model")
             self.sensor_model_exists = True
         except FileNotFoundError:
