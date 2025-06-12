@@ -28,6 +28,9 @@ int currentSelectedObject = 0;  // Which object we're currently selecting/modify
 int currentTrack = 0;
 float[] trackVolumes = new float[maxObjects];
 float[] previousVolumes = new float[maxObjects];
+// New pan control variables
+float[] trackPans = new float[maxObjects];
+float[] previousPans = new float[maxObjects];
 
 // --- ML Gesture recognition variables ---
 String lastDetectedGesture = "";
@@ -36,7 +39,7 @@ int gestureDisplayTime = 0;
 
 // --- Training mode variables ---
 boolean trainingMode = false;
-String[] availableGestures = {"volume_up", "volume_down", "next_track", "prev_track"};
+String[] availableGestures = {"volume_up", "volume_down", "next_track", "prev_track", "pan_left", "pan_right"};
 int currentGestureIndex = 0;
 boolean recordingGesture = false;
 String trainingStatus = "";
@@ -75,6 +78,9 @@ void setup() {
     gestureTrails[i] = new ArrayList<PVector>();
     trackVolumes[i] = 0.7;
     previousVolumes[i] = -1;
+    // Initialize pan values
+    trackPans[i] = 0.5; // Center pan (0.0 = left, 0.5 = center, 1.0 = right)
+    previousPans[i] = -1;
   }
   
   // Initialize OSC communication
@@ -82,9 +88,10 @@ void setup() {
   abletonAddress = new NetAddress("127.0.0.1", 11000);  // Send to Ableton on 11000
   pythonAddress = new NetAddress("127.0.0.1", 12000);   // Send to Python ML on 12000
   
-  // Request initial volumes for all tracks
+  // Request initial volumes and pans for all tracks
   for (int i = 0; i < maxObjects; i++) {
     requestTrackVolume(i);
+    requestTrackPan(i);
   }
   
   println("------------------------------------");
@@ -98,6 +105,7 @@ void setup() {
   println("UP/DOWN arrows adjust color sensitivity for current object");
   println("Press 'r' to reset color selection for current object");
   println("Press 'c' to clear all color selections");
+  println("In direct control mode: Y position = volume, X position = pan");
 }
 
 void draw() {
@@ -181,16 +189,26 @@ void trackObject(int objectIndex) {
     }
     trail.add(new PVector(trackedPoints[objectIndex].x, trackedPoints[objectIndex].y));
     
-    // If not using ML, directly map Y position to volume
+    // If not using ML, directly map positions to parameters
     if (!useMLGestures) {
       // Map Y position to volume (top = max volume, bottom = min volume)
       float newVolume = map(trackedPoints[objectIndex].y, 0, camHeight, 1.0, 0.0);
       trackVolumes[objectIndex] = newVolume;
       
+      // Map X position to pan (left = pan left, right = pan right)
+      float newPan = map(trackedPoints[objectIndex].x, 0, camWidth, 0.0, 1.0);
+      trackPans[objectIndex] = newPan;
+      
       // Send volume to Ableton if it changed enough
       if (abs(trackVolumes[objectIndex] - previousVolumes[objectIndex]) > 0.01) {
         previousVolumes[objectIndex] = trackVolumes[objectIndex];
         setTrackVolume(objectIndex);
+      }
+      
+      // Send pan to Ableton if it changed enough
+      if (abs(trackPans[objectIndex] - previousPans[objectIndex]) > 0.01) {
+        previousPans[objectIndex] = trackPans[objectIndex];
+        setTrackPan(objectIndex);
       }
     }
     
@@ -225,6 +243,18 @@ void trackObject(int objectIndex) {
     fill(255);
     textAlign(CENTER, CENTER);
     text(str(objectIndex), trackedPoints[objectIndex].x, trackedPoints[objectIndex].y - 25);
+    
+    // Draw pan position indicator
+    if (!useMLGestures) {
+      // Add pan indicator line
+      stroke(255, 255, 0); // Yellow line for pan
+      float panLength = 30; // Length of pan indicator line
+      float panAngle = map(trackPans[objectIndex], 0, 1, PI, 0); // Map pan value to angle
+      float panX = trackedPoints[objectIndex].x + cos(panAngle) * panLength;
+      float panY = trackedPoints[objectIndex].y;
+      line(trackedPoints[objectIndex].x, trackedPoints[objectIndex].y, panX, panY);
+    }
+    
     textAlign(LEFT, BASELINE); // Reset text alignment
   } else {
     objectsDetected[objectIndex] = false;
@@ -284,7 +314,8 @@ void drawUI() {
   if (colorsSelected[currentSelectedObject]) {
     text("Track: " + currentSelectedObject, 150, 40);
     text("Volume: " + nf(trackVolumes[currentSelectedObject], 0, 2), 220, 40);
-    text("Sensitivity: " + int(colorSensitivities[currentSelectedObject]), 320, 40);
+    text("Pan: " + nf(trackPans[currentSelectedObject], 0, 2), 320, 40);
+    text("Sensitivity: " + int(colorSensitivities[currentSelectedObject]), 420, 40);
   } else {
     text("No color selected", 150, 40);
   }
@@ -325,6 +356,13 @@ void drawUI() {
     
     float barHeight = trackVolumes[i] * (height-160);
     rect(xPos, 70 + (height-160) - barHeight, 25, barHeight);
+    
+    // Pan indicator
+    stroke(255, 255, 0);
+    strokeWeight(2);
+    float panPos = map(trackPans[i], 0, 1, xPos-5, xPos+30);
+    line(panPos, 70 + (height-160) - barHeight - 10, panPos, 70 + (height-160) - barHeight - 5);
+    noStroke();
     
     // Object number
     fill(255);
@@ -600,6 +638,17 @@ void oscEvent(OscMessage msg) {
       println("Volume adjusted for object " + objectIndex + " by " + amount + " to " + trackVolumes[objectIndex]);
     }
   }
+  else if (msg.addrPattern().equals("/control/pan_adjust")) {
+    int objectIndex = msg.get(0).intValue();
+    float amount = msg.get(1).floatValue();
+    float newPan = constrain(trackPans[objectIndex] + amount, 0, 1);
+    
+    if (newPan != trackPans[objectIndex]) {
+      trackPans[objectIndex] = newPan;
+      setTrackPan(objectIndex);
+      println("Pan adjusted for object " + objectIndex + " by " + amount + " to " + trackPans[objectIndex]);
+    }
+  }
   else if (msg.addrPattern().equals("/control/track_change")) {
     int objectIndex = msg.get(0).intValue();
     int track = msg.get(1).intValue();
@@ -607,6 +656,7 @@ void oscEvent(OscMessage msg) {
     if (track >= 0) {
       // In multi-object mode, each object controls its own track (track = objectIndex)
       requestTrackVolume(objectIndex);
+      requestTrackPan(objectIndex);
       println("Track changed for object " + objectIndex + " to: " + track);
     }
   }
@@ -643,6 +693,16 @@ void oscEvent(OscMessage msg) {
       println("← Received volume for track " + track + ": " + nf(volume, 0, 2));
     }
   }
+  else if (msg.addrPattern().equals("/live/track/get/pan")) {
+    int track = msg.get(0).intValue();
+    float pan = msg.get(1).floatValue();
+    
+    if (track < maxObjects) {
+      trackPans[track] = pan;
+      previousPans[track] = pan;
+      println("← Received pan for track " + track + ": " + nf(pan, 0, 2));
+    }
+  }
   else if (msg.addrPattern().equals("/live/error")) {
     println("← Error: " + msg.get(0).stringValue());
   }
@@ -662,6 +722,27 @@ void requestTrackVolume(int trackIndex) {
   println("→ Requesting track " + trackIndex + " volume");
   
   OscMessage msg = new OscMessage("/live/track/get/volume");
+  msg.add(trackIndex);
+  oscP5.send(msg, abletonAddress);
+}
+
+void setTrackPan(int trackIndex) {
+  println("→ Setting track " + trackIndex + " pan to " + nf(trackPans[trackIndex], 0, 2));
+  
+  // Map from 0-1 range to -1 to 1 range for Ableton
+  float mappedPan = map(trackPans[trackIndex], 0.0, 1.0, -1.0, 1.0);
+  
+  // Send using standard track pan control with the correct address
+  OscMessage msg = new OscMessage("/live/track/set/panning");
+  msg.add(trackIndex);    // Track number
+  msg.add(mappedPan);     // Pan value (-1.0 to 1.0)
+  oscP5.send(msg, abletonAddress);
+}
+
+void requestTrackPan(int trackIndex) {
+  println("→ Requesting track " + trackIndex + " pan");
+  
+  OscMessage msg = new OscMessage("/live/track/get/panning");
   msg.add(trackIndex);
   oscP5.send(msg, abletonAddress);
 }

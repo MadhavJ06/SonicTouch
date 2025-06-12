@@ -280,6 +280,11 @@ class GestureRecognizer:
                     self.change_track(object_index, 1)
                 elif gesture == "prev_track":
                     self.change_track(object_index, -1)
+                # Add these new cases for pan gestures
+                elif gesture == "pan_left":
+                    self.adjust_pan(object_index, -0.1, movement_magnitude)
+                elif gesture == "pan_right":
+                    self.adjust_pan(object_index, 0.1, movement_magnitude)
         except Exception as e:
             print(f"Error analyzing gesture for object {object_index}: {e}")
     
@@ -294,6 +299,17 @@ class GestureRecognizer:
         
         # Send to Processing for actual volume adjustment
         self.client_processing.send_message("/control/volume_adjust", [object_index, scaled_amount])
+    
+    def adjust_pan(self, objectIndex, amount, movement_magnitude=1.0):
+        """Send pan adjustment to Processing"""
+        # Scale the amount based on movement magnitude
+        scale_factor = min(2.0, max(0.5, movement_magnitude * 2))
+        scaled_amount = amount * scale_factor
+        
+        print(f"Adjusting pan for object {objectIndex} by {scaled_amount:.2f} (base: {amount}, magnitude: {movement_magnitude:.2f})")
+        
+        # Send to Processing for actual pan adjustment
+        self.client_processing.send_message("/control/pan_adjust", [objectIndex, scaled_amount])
     
     def change_track(self, object_index, direction):
         """Change track in Ableton for a specific object"""
