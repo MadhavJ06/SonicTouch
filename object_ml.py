@@ -372,16 +372,18 @@ class GestureRecognizer:
             confidence = max(prediction_proba)
             gesture = self.sensor_model.classes_[np.argmax(prediction_proba)]
 
+            # Always reset cooldown and clear buffer after prediction attempt
+            self.last_prediction_time = current_time
+            self.live_data_buffer.clear()
+
             # Only act on confident predictions
-            if confidence > 0.60:
+            if confidence > 0.6:
                 print(f"SENSOR GESTURE DETECTED! '{gesture}' with {confidence:.2f} confidence")
                 
                 # Apply the sensor-based gesture actions
                 self.handle_sensor_gesture(gesture, confidence)
-                
-                # Reset the buffer and start cooldown
-                self.live_data_buffer.clear()
-                self.last_prediction_time = current_time
+            else:
+                print(f"Low confidence prediction: '{gesture}' ({confidence:.2f}) - ignoring")
 
     def handle_sensor_gesture(self, gesture, confidence):
         """Handle sensor-based gesture actions (from run_conductor.py)"""
@@ -406,26 +408,33 @@ class GestureRecognizer:
             
             # First, query current values to see what they are before we change them
             print("Querying current parameter values...")
-            self.client_ableton.send_message("/live/device/get/parameter/value", [0, 0, 4])  # Space
-            self.client_ableton.send_message("/live/device/get/parameter/value", [1, 0, 3])  # Reverb
+            self.client_ableton.send_message("/live/device/get/parameter/value", [0, 0, 4])  # Space on track 0
+            self.client_ableton.send_message("/live/device/get/parameter/value", [1, 0, 3])  # Reverb on track 1
+            self.client_ableton.send_message("/live/device/get/parameter/value", [3, 0, 4])  # Space on track 3
             
             # Track 0 (Outland Bells): Control "Space" parameter [4] (range 0-127)
             space_value = np.random.randint(25, 115)  # Random value between 25-115 for dramatic but musical effect
-            print(f"Setting Space parameter [4] to: {space_value}")
+            print(f"Setting Space parameter [4] on track 0 to: {space_value}")
             self.client_ableton.send_message("/live/device/set/parameter/value", [0, 0, 4, space_value])
             
             # Track 1 (Dry Session Kit): Control "Reverb" parameter [3] (range 0-127)
             reverb_value = np.random.randint(10, 100)  # Random value between 10-100 for controlled reverb
-            print(f"Setting Reverb parameter [3] to: {reverb_value}")
+            print(f"Setting Reverb parameter [3] on track 1 to: {reverb_value}")
             self.client_ableton.send_message("/live/device/set/parameter/value", [1, 0, 3, reverb_value])
+            
+            # Track 3: Control "Space" parameter [4] (range 0-127)
+            space_value_track3 = np.random.randint(25, 115)  # Random value between 25-115 for dramatic effect
+            print(f"Setting Space parameter [4] on track 2 to: {space_value_track3}")
+            self.client_ableton.send_message("/live/device/set/parameter/value", [2, 0, 7, space_value_track3])
             
             # Query values again after setting to verify they changed
             time.sleep(0.1)  # Small delay to allow Ableton to process
             print("Querying parameter values after setting...")
-            self.client_ableton.send_message("/live/device/get/parameter/value", [0, 0, 4])  # Space
-            self.client_ableton.send_message("/live/device/get/parameter/value", [1, 0, 3])  # Reverb
+            self.client_ableton.send_message("/live/device/get/parameter/value", [0, 0, 4])  # Space on track 0
+            self.client_ableton.send_message("/live/device/get/parameter/value", [1, 0, 3])  # Reverb on track 1
+            self.client_ableton.send_message("/live/device/get/parameter/value", [3, 0, 4])  # Space on track 3
             
-            print(f"Applied Space modulation: {space_value:.2f}, Reverb modulation: {reverb_value:.2f}")
+            print(f"Applied modulation: Space (track 0) = {space_value:.2f}, Reverb (track 1) = {reverb_value:.2f}, Space (track 3) = {space_value_track3:.2f}")
 
         elif gesture == 'crescendo':
             # Solo each track alternatively
@@ -523,9 +532,16 @@ class GestureRecognizer:
         
         try:
             # Instead of serve_forever, we run a loop to periodically call sensor predictor
+            last_prediction_check = 0
             while True:
                 self.server.handle_request()  # Handle one incoming request
-                self.predict_and_perform_sensor()  # Check if we should predict from sensor data
+                
+                # Only check for predictions every 0.1 seconds instead of every 0.01 seconds
+                current_time = time.time()
+                if current_time - last_prediction_check >= 0.1:
+                    self.predict_and_perform_sensor()  # Check if we should predict from sensor data
+                    last_prediction_check = current_time
+                    
                 time.sleep(0.01)  # Small sleep to prevent 100% CPU usage
         except KeyboardInterrupt:
             self.server.shutdown()
