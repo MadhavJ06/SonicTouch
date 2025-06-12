@@ -373,7 +373,7 @@ class GestureRecognizer:
             gesture = self.sensor_model.classes_[np.argmax(prediction_proba)]
 
             # Only act on confident predictions
-            if confidence > 0.5:
+            if confidence > 0.60:
                 print(f"SENSOR GESTURE DETECTED! '{gesture}' with {confidence:.2f} confidence")
                 
                 # Apply the sensor-based gesture actions
