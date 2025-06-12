@@ -4,8 +4,8 @@ import netP5.*;
 
 // --- Camera settings ---
 Capture cam;
-int camWidth = 640;
-int camHeight = 480;
+int camWidth = 800;
+int camHeight = 540;
 
 // --- OSC communication ---
 OscP5 oscP5;
