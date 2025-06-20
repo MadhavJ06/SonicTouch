@@ -13,7 +13,8 @@ from sklearn.preprocessing import StandardScaler
 
 class GestureRecognizer:
     def __init__(self, input_port=12000, processing_port=12001, ableton_port=11000,
-                 phone_port=6448, confidence_threshold=0.75, gesture_cooldown=1.0, min_movement=0.2):
+                 phone_port=6448, confidence_threshold=0.75, gesture_cooldown=1.0, min_movement=0.2,
+                 gesture_confidence_thresholds=None):
         # OSC communication
         self.client_processing = udp_client.SimpleUDPClient("127.0.0.1", processing_port)
         self.client_ableton = udp_client.SimpleUDPClient("127.0.0.1", ableton_port)
@@ -23,9 +24,25 @@ class GestureRecognizer:
         self.position_histories = [deque(maxlen=30) for _ in range(self.max_objects)]
         self.last_gesture_times = [time.time() for _ in range(self.max_objects)]
         self.gesture_cooldown = gesture_cooldown  # Seconds between gesture recognition attempts
-        self.confidence_threshold = confidence_threshold  # Minimum confidence for gesture detection
+        self.confidence_threshold = confidence_threshold  # Default minimum confidence for gesture detection
         self.min_movement = min_movement  # Minimum movement for gesture detection
         self.current_tracks = list(range(self.max_objects))  # Each object controls its own track
+        
+        # Per-gesture confidence thresholds
+        self.gesture_confidence_thresholds = gesture_confidence_thresholds or {
+            # Object tracking gestures (default thresholds)
+            'volume_up': 0.75,
+            'volume_down': 0.75,
+            'next_track': 0.75,
+            'prev_track': 0.75,
+            'pan_left': 0.75,
+            'pan_right': 0.75,
+            # Sensor gestures (default thresholds)
+            'stir': 0.75,  # Higher threshold for stir to reduce misdetection
+            'wave': 0.5,
+            'circle': 0.5,
+            'crescendo': 0.5
+        }
         
         # Phone sensor data storage (from run_conductor.py)
         self.live_data_buffer = deque()
@@ -97,6 +114,12 @@ class GestureRecognizer:
         print(f"Sending to Processing on {self.processing_address[0]}:{self.processing_address[1]}")
         print(f"Sending to Ableton on {self.ableton_address[0]}:{self.ableton_address[1]}")
         print(f"Recognition settings: confidence={confidence_threshold}, cooldown={gesture_cooldown}s, min_movement={min_movement}")
+        
+        # Print per-gesture confidence thresholds
+        print("\nPer-gesture confidence thresholds:")
+        for gesture, threshold in self.gesture_confidence_thresholds.items():
+            print(f"  {gesture}: {threshold:.2f}")
+        print("")
     def position_handler(self, unused_addr, object_index, x, y, detected):
         """Handle incoming position updates from Processing for multiple objects"""
         if object_index >= self.max_objects:
@@ -256,13 +279,15 @@ class GestureRecognizer:
             
             # Scale features
             features_scaled = self.object_scaler.transform([features])
-            
-            # Predict gesture
+              # Predict gesture
             gesture = self.object_model.predict(features_scaled)[0]
             confidence = np.max(self.object_model.predict_proba(features_scaled))
             
-            if confidence > self.confidence_threshold:  # Only accept confident predictions
-                print(f"Detected gesture: {gesture} from object {object_index} (confidence: {confidence:.2f})")
+            # Get gesture-specific confidence threshold
+            gesture_threshold = self.gesture_confidence_thresholds.get(gesture, self.confidence_threshold)
+            
+            if confidence > gesture_threshold:  # Use gesture-specific threshold
+                print(f"Detected gesture: {gesture} from object {object_index} (confidence: {confidence:.2f}, threshold: {gesture_threshold:.2f})")
                 
                 # Send gesture information back to Processing
                 self.client_processing.send_message("/gesture/detected", [gesture, confidence, object_index])
@@ -390,16 +415,17 @@ class GestureRecognizer:
 
             # Always reset cooldown and clear buffer after prediction attempt
             self.last_prediction_time = current_time
-            self.live_data_buffer.clear()
-
-            # Only act on confident predictions
-            if confidence > 0.6:
-                print(f"SENSOR GESTURE DETECTED! '{gesture}' with {confidence:.2f} confidence")
+            self.live_data_buffer.clear()            # Only act on confident predictions
+            # Get gesture-specific confidence threshold for sensor gestures
+            gesture_threshold = self.gesture_confidence_thresholds.get(gesture, 0.6)
+            
+            if confidence > gesture_threshold:
+                print(f"SENSOR GESTURE DETECTED! '{gesture}' with {confidence:.2f} confidence (threshold: {gesture_threshold:.2f})")
                 
                 # Apply the sensor-based gesture actions
                 self.handle_sensor_gesture(gesture, confidence)
             else:
-                print(f"Low confidence prediction: '{gesture}' ({confidence:.2f}) - ignoring")
+                print(f"Low confidence prediction: '{gesture}' ({confidence:.2f}) - ignoring (threshold: {gesture_threshold:.2f})")
 
     def handle_sensor_gesture(self, gesture, confidence):
         """Handle sensor-based gesture actions (from run_conductor.py)"""
@@ -577,7 +603,36 @@ if __name__ == "__main__":
                        help="Minimum movement required for gesture recognition")
     parser.add_argument("--query-parameters", action="store_true",
                        help="Query and display all available device parameters")
+    parser.add_argument("--stir-confidence", default=0.75, type=float,
+                       help="Confidence threshold for 'stir' gesture (default: 0.85)")
+    parser.add_argument("--wave-confidence", default=0.5, type=float,
+                       help="Confidence threshold for 'wave' gesture (default: 0.6)")
+    parser.add_argument("--circle-confidence", default=0.5, type=float,
+                       help="Confidence threshold for 'circle' gesture (default: 0.6)")
+    parser.add_argument("--crescendo-confidence", default=0.5, type=float,
+                       help="Confidence threshold for 'crescendo' gesture (default: 0.6)")
+    parser.add_argument("--volume-confidence", default=0.75, type=float,
+                       help="Confidence threshold for volume gestures (default: 0.75)")
+    parser.add_argument("--track-confidence", default=0.75, type=float,
+                       help="Confidence threshold for track change gestures (default: 0.75)")
+    parser.add_argument("--pan-confidence", default=0.75, type=float,
+                       help="Confidence threshold for pan gestures (default: 0.75)")
     args = parser.parse_args()
+    
+    # Build gesture confidence thresholds from command line arguments
+    gesture_confidence_thresholds = {
+        # Sensor gestures
+        'stir': args.stir_confidence,
+        'wave': args.wave_confidence,
+        'circle': args.circle_confidence,
+        'crescendo': args.crescendo_confidence,
+        # Object tracking gestures
+        'volume_up': args.volume_confidence,
+        'volume_down': args.volume_confidence,
+        'next_track': args.track_confidence,
+        'prev_track': args.track_confidence,
+        'pan_left': args.pan_confidence,
+        'pan_right': args.pan_confidence    }
     
     recognizer = GestureRecognizer(
         input_port=args.input_port,
@@ -586,7 +641,8 @@ if __name__ == "__main__":
         ableton_port=args.ableton_port,
         confidence_threshold=args.confidence_threshold,
         gesture_cooldown=args.gesture_cooldown,
-        min_movement=args.min_movement
+        min_movement=args.min_movement,
+        gesture_confidence_thresholds=gesture_confidence_thresholds
     )
     
     if args.query_parameters:
